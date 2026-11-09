@@ -1,0 +1,62 @@
+{
+ "metadata": {
+  "tag": "99904c6fdd2b5b352647e0b251bb94e8b22c516a97a45c6d18c74798089152c3",
+  "attributions": [
+   "https://developer.qweather.com/attribution.html"
+  ]
+ },
+ "validTime": "2026-11-09T11:45+08:00",
+ "condition": {
+  "text": "晴",
+  "code": "100"
+ },
+ "temperature": {
+  "value": 9.15,
+  "unit": "°C"
+ },
+ "feelsLike": {
+  "value": 5.07,
+  "unit": "°C"
+ },
+ "humidity": 0.3,
+ "wind": {
+  "direction": {
+   "degree": 207,
+   "compass": "ssw"
+  },
+  "speed": {
+   "value": 3.74,
+   "unit": "m/s"
+  },
+  "scale": 3
+ },
+ "windGust": {
+  "value": 7.03,
+  "unit": "m/s"
+ },
+ "precipitation": {
+  "amount": {
+   "value": 0,
+   "unit": "mm"
+  },
+  "intensity": {
+   "value": 0,
+   "unit": "mm/h"
+  },
+  "type": "none"
+ },
+ "pressure": {
+  "value": 1038.75,
+  "unit": "hPa"
+ },
+ "visibility": {
+  "value": 30060,
+  "unit": "m"
+ },
+ "dewPoint": {
+  "value": -7.77,
+  "unit": "°C"
+ },
+ "cloudCover": 0,
+ "uvIndex": 2
+}

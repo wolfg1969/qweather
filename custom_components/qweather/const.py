@@ -10,6 +10,7 @@ MANUFACTURER = "Qweather, Inc."
 CONF_LOCATION_ID = "location_id"
 CONF_API_KEY = "api_key"
 CONF_API_VERSION = "api_version"
+DEFAULT_API_VERSION = "v1"
 CONF_USE_TOKEN = "use_token"
 CONF_LOCATION = "location"
 CONF_ALERT = "alert"
@@ -77,5 +78,17 @@ SUGGESTIONTPYE2NAME = {
     '15': '交通指数',
     '16': '防晒指数',
 }
+
+# WebAPI v1 returns English compass points; the card expects Chinese.
+COMPASS_CN = {
+    "n": "北风", "nne": "北东北风", "ne": "东北风", "ene": "东东北风",
+    "e": "东风", "ese": "东东南风", "se": "东南风", "sse": "南东南风",
+    "s": "南风", "ssw": "南西南风", "sw": "西南风", "wsw": "西西南风",
+    "w": "西风", "wnw": "西西北风", "nw": "西北风", "nnw": "北西北风",
+    "none": "无持续风向", "vrb": "风向不定",
+}
+
+# WebAPI v1 alert color codes.
+ALERT_COLOR_CN = {"blue": "蓝色", "yellow": "黄色", "orange": "橙色", "red": "红色"}
 
 

@@ -1,0 +1,160 @@
+{
+ "metadata": {
+  "tag": "0d6a2980de9c4af7fe41db2b5eec596bb5d7484d72818001d43f28941036bd5f",
+  "attributions": [
+   "https://developer.qweather.com/attribution.html"
+  ]
+ },
+ "indexes": [
+  {
+   "code": "cn-mee",
+   "name": "AQI (CN)",
+   "aqi": 17,
+   "aqiDisplay": "17",
+   "level": "1",
+   "category": "优",
+   "color": {
+    "red": 0,
+    "green": 228,
+    "blue": 0,
+    "alpha": 1
+   },
+   "primaryPollutant": null,
+   "health": {
+    "effect": "空气质量令人满意，基本无空气污染。",
+    "advice": {
+     "generalPopulation": "各类人群可正常活动。",
+     "sensitivePopulation": "各类人群可正常活动。"
+    }
+   }
+  }
+ ],
+ "pollutants": [
+  {
+   "code": "pm2p5",
+   "name": "PM 2.5",
+   "fullName": "颗粒物（粒径小于等于2.5µm）",
+   "concentration": {
+    "value": 8.0,
+    "unit": "μg/m³"
+   },
+   "subIndexes": [
+    {
+     "code": "cn-mee",
+     "aqi": 12,
+     "aqiDisplay": "12"
+    }
+   ]
+  },
+  {
+   "code": "pm10",
+   "name": "PM 10",
+   "fullName": "颗粒物（粒径小于等于10µm）",
+   "concentration": {
+    "value": 16.0,
+    "unit": "μg/m³"
+   },
+   "subIndexes": [
+    {
+     "code": "cn-mee",
+     "aqi": 17,
+     "aqiDisplay": "17"
+    }
+   ]
+  },
+  {
+   "code": "no2",
+   "name": "NO2",
+   "fullName": "二氧化氮",
+   "concentration": {
+    "value": 20.0,
+    "unit": "μg/m³"
+   },
+   "subIndexes": [
+    {
+     "code": "cn-mee",
+     "aqi": 11,
+     "aqiDisplay": "11"
+    }
+   ]
+  },
+  {
+   "code": "o3",
+   "name": "O3",
+   "fullName": "臭氧",
+   "concentration": {
+    "value": 39.0,
+    "unit": "μg/m³"
+   },
+   "subIndexes": [
+    {
+     "code": "cn-mee",
+     "aqi": 13,
+     "aqiDisplay": "13"
+    }
+   ]
+  },
+  {
+   "code": "so2",
+   "name": "SO2",
+   "fullName": "二氧化硫",
+   "concentration": {
+    "value": 3.0,
+    "unit": "μg/m³"
+   },
+   "subIndexes": [
+    {
+     "code": "cn-mee",
+     "aqi": 1,
+     "aqiDisplay": "1"
+    }
+   ]
+  },
+  {
+   "code": "co",
+   "name": "CO",
+   "fullName": "一氧化碳",
+   "concentration": {
+    "value": 0.5,
+    "unit": "mg/m³"
+   },
+   "subIndexes": [
+    {
+     "code": "cn-mee",
+     "aqi": 6,
+     "aqiDisplay": "6"
+    }
+   ]
+  }
+ ],
+ "stations": [
+  {
+   "id": "P56509",
+   "name": "八角北路9号"
+  },
+  {
+   "id": "P56601",
+   "name": "丰台云岗"
+  },
+  {
+   "id": "P58655",
+   "name": "万寿西宫"
+  },
+  {
+   "id": "P59067",
+   "name": "天坛"
+  },
+  {
+   "id": "P51667",
+   "name": "丰台小屯"
+  },
+  {
+   "id": "P58911",
+   "name": "海淀区万柳"
+  },
+  {
+   "id": "P5257",
+   "name": "官园"
+  }
+ ]
+}

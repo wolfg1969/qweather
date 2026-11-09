@@ -54,6 +54,7 @@ from .const import (
     CONF_PRIVATE_KEY,
 )
 from .condition import CONDITION_MAP, EXCEPTIONAL
+from .mapping import WarningData
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -194,25 +195,6 @@ class Suggestion:
     title_cn: str
     brf: str
     txt: str
-
-@dataclass
-class WarningData:
-    id: str             # 预警ID
-    sender: str         # 发布单位
-    pubTime: str        # 发布时间
-    title: str          # 标题
-    startTime: str      # 开始时间
-    endTime: str        # 结束时间
-    status: str         # 状态 (active/update/cancel)
-    level: str          # 等级 (蓝色/黄色/橙色/红色)
-    severity: str       # 严重程度 (Unknown/Minor/Moderate/Severe/Extreme)
-    severityColor: str  # 严重程度颜色
-    type: str           # 预警类型ID
-    typeName: str       # 预警类型名称
-    urgency: str        # 紧迫程度
-    certainty: str      # 确定性
-    text: str           # 详细描述
-    related: str        # 关联的预警ID
 
 class WeatherData:
     def __init__(self, hass, name, unique_id, host, config, usetoken, location, options):
