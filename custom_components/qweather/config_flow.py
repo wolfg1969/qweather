@@ -45,7 +45,8 @@ class QweatherlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return QweatherOptionsFlow(config_entry)
+        # HA 2025.12+ removed OptionsFlow.__init__(config_entry).
+        return QweatherOptionsFlow()
 
     def __init__(self):
         """Initialize."""
@@ -290,7 +291,7 @@ class QweatherlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(title="configuration.yaml", data={})
 
 
-class QweatherOptionsFlow(config_entries.OptionsFlow):
+class QweatherOptionsFlow(config_entries.OptionsFlowWithReload):
     async def async_step_init(self, user_input=None):
         return await self.async_step_user()
 
