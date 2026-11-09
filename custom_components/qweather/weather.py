@@ -48,6 +48,7 @@ from .const import (
     CONF_PROJECT_ID,
     CONF_KEY_ID,
     CONF_PRIVATE_KEY,
+    CONF_DEV_ID,
     CONF_API_VERSION,
     DEFAULT_API_VERSION,
 )
@@ -55,14 +56,14 @@ from .condition import CONDITION_MAP, EXCEPTIONAL
 from .mapping import (
     WarningData,
     build_hourly_summary,
+    map_air_quality,
+    map_alerts,
     map_current,
     map_daily,
     map_hourly,
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-VERSION = "2026.2.5"
 
 # Falsey sentinel: tells the warning block apart from "request failed".
 _SKIP = False
@@ -250,6 +251,9 @@ class WeatherData:
         try:
             now_ts = int(time.time())
             payload = {'iat': now_ts - 30, 'exp': now_ts + 900, 'sub': self._config.get(CONF_PROJECT_ID)}
+            dev_id = self._config.get(CONF_DEV_ID)
+            if dev_id:
+                payload['iss'] = dev_id
             headers = {'kid': self._config.get(CONF_KEY_ID)}
             return jwt.encode(payload, self._config.get(CONF_PRIVATE_KEY), algorithm='EdDSA', headers=headers)
         except Exception as e:
@@ -345,52 +349,10 @@ class WeatherData:
             await self._update_v7(fetch)
 
         # 4. Air Quality
-        try:
-            location_parts = self._location.split(',')
-            lon, lat = location_parts[0].strip(), location_parts[1].strip()
-            # V1 新版接口
-            air_v1_url = f"https://api.qweather.com/airquality/v1/current/{lat}/{lon}"
-            air_data = await fetch(air_v1_url, 'air', params={'lang': 'zh'})
+        await self._update_air(fetch, coords if use_v1 else None, now)
 
-            if air_data:
-                # 兼容 V1 airNow 或 v7 now
-                self._aqi = air_data.get('airNow') or air_data.get('now') or air_data
-            else:
-                # 回退到 V7 (适配部分未开通V1权限的KEY)
-                air_v7_url = f"https://{self._host}/v7/air/now?location={self._location}"
-                air_v7_data = await fetch(air_v7_url, 'air', params={'lang': 'zh'})
-                if air_v7_data:
-                    self._aqi = air_v7_data.get('now', {})
-        except Exception as e:
-            _LOGGER.error("[%s] AQI error: %s", self._name, e)
-            self._aqi = {}
-
-        # 5. Others (Warning & Indices & Astronomy & Minutely)
-        warn_resp = await fetch(f"https://{self._host}/v7/warning/now?location={self._location}", 'warning', params={'lang': 'zh'})
-
-        if warn_resp and 'warning' in warn_resp:
-            self._weather_warning = [
-                WarningData(
-                    id=w.get('id', ''),
-                    sender=w.get('sender', ''),
-                    pubTime=w.get('pubTime', ''),
-                    title=w.get('title', ''),
-                    startTime=w.get('startTime', ''),
-                    endTime=w.get('endTime', ''),
-                    status=w.get('status', ''),
-                    level=w.get('level', ''),
-                    severity=w.get('severity', ''),
-                    severityColor=w.get('severityColor', ''),
-                    type=w.get('type', ''),
-                    typeName=w.get('typeName', ''),
-                    urgency=w.get('urgency', ''),
-                    certainty=w.get('certainty', ''),
-                    text=w.get('text', ''),
-                    related=w.get('related', '')
-                ) for w in warn_resp['warning']
-            ]
-        elif warn_resp is not _SKIP:
-            self._weather_warning = [] # Clear on a real empty response
+        # 5. Weather warnings
+        await self._update_warning(fetch, coords if use_v1 else None)
 
         if self._options.get(CONF_LIFEINDEX, True):
             idx_resp = await fetch(f"https://{self._host}/v7/indices/1d?type=0&location={self._location}", 'indices', params={'lang': 'zh'})
@@ -398,27 +360,10 @@ class WeatherData:
                 self._suggestion = [Suggestion(title=SUGGESTIONTPYE2NAME.get(v.get('type'), "未知"), title_cn=v.get('name'), brf=v.get('category'), txt=v.get('text')) for v in idx_resp['daily']]
 
         # 6. Geo (City Lookup)
-        if self._city is None:
-            try:
-                # GeoAPI 使用独立的域名 geoapi.qweather.com
-                geo_url = f"https://geoapi.qweather.com/v2/city/lookup?location={self._location}&lang=zh"
-
-                # 复用上面已经定义好的 headers (包含 token 或 api key)
-                async with self._session.get(geo_url, headers=headers, timeout=10) as resp:
-                    geo_data = await resp.json(content_type=None)
-                    if geo_data.get("code") == "200" and geo_data.get("location"):
-                        city_name = geo_data["location"][0]["name"]
-                        self._city = city_name
-                        _LOGGER.info("[%s] City initialized: %s", self._name, self._city)
-                    else:
-                        _LOGGER.warning("[%s] GeoAPI failed: %s", self._name, geo_data.get("code"))
-                        self._city = "未知" # 避免反复请求失败
-            except Exception as e:
-                _LOGGER.error("[%s] GeoAPI Request Error: %s", self._name, e)
-                self._city = "未知" # 出错暂定未知，下次重启再试
+        await self._update_geo(headers)
 
         min_resp = await fetch(f"https://{self._host}/v7/minutely/5m?location={self._location}", 'minutely', params={'lang': 'zh'})
-        if min_resp and min_resp is not _SKIP: self._minutely_summary = min_resp.get("summary", "")
+        if min_resp: self._minutely_summary = min_resp.get("summary", "")
 
         if use_v1:
             self._update_sun_from_daily()
@@ -582,3 +527,117 @@ class WeatherData:
         sun_resp = await fetch(f"https://{self._host}/v7/astronomy/sun?location={self._location}&date={today_str}", 'sun', params={'lang': 'zh'})
         if sun_resp:
             self._sun_data = {"sunrise": sun_resp.get("sunrise"), "sunset": sun_resp.get("sunset")}
+
+    async def _update_air(self, fetch, coords, now):
+        """Fetch air quality, trying v1 then falling back to v7."""
+        if coords is not None:
+            lat, lon = coords
+            pub_time = now.isoformat(timespec="seconds") if hasattr(now, "isoformat") else None
+
+            def _valid(data):
+                indexes = data.get("indexes") or []
+                return any(
+                    isinstance(item, dict) and item.get("aqi") is not None
+                    for item in indexes
+                )
+
+            air_data = await fetch(
+                f"https://{self._host}/airquality/v1/current/{lat}/{lon}", 'air',
+                params={'lang': 'zh'},
+                validate=_valid,
+                auth_log=logging.DEBUG,
+            )
+            if air_data:
+                mapped = map_air_quality(air_data, pub_time)
+                if mapped.get("aqi") is not None:
+                    self._aqi = mapped
+                    return
+
+        # Fall back to v7 for keys without v1 air-quality permission.
+        air_v7_data = await fetch(
+            f"https://{self._host}/v7/air/now?location={self._location}", 'air',
+            params={'lang': 'zh'},
+        )
+        if air_v7_data:
+            self._aqi = air_v7_data.get('now', {})
+
+    async def _update_warning(self, fetch, coords):
+        """Fetch weather alerts, trying v1 then falling back to v7."""
+        if coords is not None:
+            lat, lon = coords
+            warn_resp = await fetch(
+                f"https://{self._host}/weatheralert/v1/current/{lat}/{lon}", 'warning',
+                params={'localTime': 'true', 'lang': 'zh'},
+                validate=lambda data: "alerts" in data,
+                auth_log=logging.DEBUG,
+            )
+            if warn_resp is _SKIP:
+                return
+            if warn_resp is not None:
+                # zeroResult / empty alerts both map to an empty list.
+                self._weather_warning = map_alerts(warn_resp)
+                return
+
+        warn_resp = await fetch(
+            f"https://{self._host}/v7/warning/now?location={self._location}", 'warning',
+            params={'lang': 'zh'},
+        )
+        if warn_resp is _SKIP or warn_resp is None:
+            # Throttled or failed: keep the previous warnings.
+            return
+
+        if 'warning' in warn_resp:
+            self._weather_warning = [
+                WarningData(
+                    id=w.get('id', ''),
+                    sender=w.get('sender', ''),
+                    pubTime=w.get('pubTime', ''),
+                    title=w.get('title', ''),
+                    startTime=w.get('startTime', ''),
+                    endTime=w.get('endTime', ''),
+                    status=w.get('status', ''),
+                    level=w.get('level', ''),
+                    severity=w.get('severity', ''),
+                    severityColor=w.get('severityColor', ''),
+                    type=w.get('type', ''),
+                    typeName=w.get('typeName', ''),
+                    urgency=w.get('urgency', ''),
+                    certainty=w.get('certainty', ''),
+                    text=w.get('text', ''),
+                    related=w.get('related', '')
+                ) for w in warn_resp['warning']
+            ]
+        else:
+            self._weather_warning = []
+
+    async def _update_geo(self, headers):
+        """Resolve the city name via the configured host, then the legacy domain."""
+        if self._city is not None:
+            return
+
+        urls = [
+            f"https://{self._host}/geo/v2/city/lookup?location={self._location}&lang=zh",
+            f"https://geoapi.qweather.com/v2/city/lookup?location={self._location}&lang=zh",
+        ]
+        for geo_url in urls:
+            try:
+                async with self._session.get(geo_url, headers=headers, timeout=10) as resp:
+                    if resp.status >= 400:
+                        continue
+                    geo_data = await resp.json(content_type=None)
+                    if (isinstance(geo_data, dict)
+                            and geo_data.get("code") == "200"
+                            and geo_data.get("location")):
+                        self._city = geo_data["location"][0]["name"]
+                        _LOGGER.info("[%s] City initialized: %s", self._name, self._city)
+                        return
+                    code = geo_data.get("code") if isinstance(geo_data, dict) else None
+                    _LOGGER.debug("[%s] Geo lookup failed via %s: %s", self._name, geo_url, code)
+            except Exception as e:
+                _LOGGER.debug("[%s] Geo request failed via %s: %s", self._name, geo_url, e)
+
+        _LOGGER.warning(
+            "[%s] Geo lookup failed via both %s and geoapi.qweather.com",
+            self._name, self._host,
+        )
+        self._city = "未知"  # Avoid retrying every update cycle

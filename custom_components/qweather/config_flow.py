@@ -31,6 +31,9 @@ from .const import (
     CONF_PROJECT_ID,
     CONF_KEY_ID,
     CONF_PRIVATE_KEY,
+    CONF_DEV_ID,
+    CONF_API_VERSION,
+    DEFAULT_API_VERSION,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -69,13 +72,15 @@ class QweatherlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.error("密钥生成失败: %s", e)
             return None, None
 
-    def generate_jwt(self, pid, kid, private_key_pem):
+    def generate_jwt(self, pid, kid, private_key_pem, dev_id=None):
         try:
             payload = {
                 'iat': int(time.time()) - 30,
                 'exp': int(time.time()) + 900,
                 'sub': pid
             }
+            if dev_id:
+                payload['iss'] = dev_id
             headers = {'kid': kid}
             return jwt.encode(
                 payload,
@@ -90,11 +95,13 @@ class QweatherlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     def get_data(self, url, headers):
         try:
             response = requests.get(url, headers=headers, timeout=(3, 5))
-            if response.status_code in [401, 403]:
+            if response.status_code >= 400:
                 return {"code": str(response.status_code)}
                 
-            response.raise_for_status()
-            return response.json()
+            try:
+                return response.json()
+            except ValueError:
+                return None
         except requests.exceptions.ConnectTimeout:
             return {"code": "timeout"}
         except requests.exceptions.ReadTimeout:
@@ -154,7 +161,8 @@ class QweatherlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             token = self.generate_jwt(
                 user_input[CONF_PROJECT_ID],
                 user_input[CONF_KEY_ID],
-                self._generated_private_key
+                self._generated_private_key,
+                user_input.get(CONF_DEV_ID),
             )
             
             if token:
@@ -173,6 +181,7 @@ class QweatherlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         schema = OrderedDict()
         schema[vol.Required(CONF_PROJECT_ID, default=user_input.get(CONF_PROJECT_ID, ""))] = str
         schema[vol.Required(CONF_KEY_ID, default=user_input.get(CONF_KEY_ID, ""))] = str
+        schema[vol.Optional(CONF_DEV_ID, default=user_input.get(CONF_DEV_ID, ""))] = str
 
         return self.async_show_form(
             step_id="jwt_setup",
@@ -202,8 +211,15 @@ class QweatherlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             headers = {"X-QW-Api-Key": credential}
 
         if not re.match(r"^-?\d+\.?\d*,-?\d+\.?\d*$", location.replace(" ", "")):
-            geo_url = f"https://geoapi.qweather.com/v2/city/lookup?location={location}&lang=zh"
-            geo_data = await self.hass.async_add_executor_job(self.get_data, geo_url, headers)
+            geo_data = None
+            for geo_base in (
+                f"https://{data[CONF_HOST]}/geo/v2/city/lookup",
+                "https://geoapi.qweather.com/v2/city/lookup",
+            ):
+                geo_url = f"{geo_base}?location={location}&lang=zh"
+                geo_data = await self.hass.async_add_executor_job(self.get_data, geo_url, headers)
+                if geo_data and geo_data.get('code') == "200" and geo_data.get('location'):
+                    break
             
             if geo_data and geo_data.get('code') == "200" and geo_data.get('location'):
                 loc_info = geo_data['location'][0]
@@ -221,8 +237,34 @@ class QweatherlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
                 return self._show_step_jwt_form(data) if is_jwt else self._show_step_user_form(data)
 
-        test_url = f"https://{data[CONF_HOST]}/v7/weather/now?location={data[CONF_LOCATION]}&lang=zh"
-        redata = await self.hass.async_add_executor_job(self.get_data, test_url, headers)
+        redata = None
+        v1_ok = False
+        location_parts = data[CONF_LOCATION].replace(" ", "").split(",")
+        if len(location_parts) == 2:
+            try:
+                lon = round(float(location_parts[0]), 2)
+                lat = round(float(location_parts[1]), 2)
+            except (TypeError, ValueError):
+                lat = lon = None
+            if lat is not None:
+                v1_url = (
+                    f"https://{data[CONF_HOST]}/weather/v1/current/{lat}/{lon}"
+                    "?localTime=true&lang=zh"
+                )
+                v1_data = await self.hass.async_add_executor_job(self.get_data, v1_url, headers)
+                v1_ok = (
+                    isinstance(v1_data, dict)
+                    and "metadata" in v1_data
+                    and "error" not in v1_data
+                )
+                if v1_ok:
+                    redata = {"code": "200"}
+
+        if not v1_ok:
+            test_url = f"https://{data[CONF_HOST]}/v7/weather/now?location={data[CONF_LOCATION]}&lang=zh"
+            redata = await self.hass.async_add_executor_job(self.get_data, test_url, headers)
+            if redata and redata.get('code') == "200":
+                _LOGGER.info("v1 端点验证失败，已回退到 v7 验证成功")
 
         if not redata or redata.get('code') != "200":
             code = redata.get('code', 'connect_fail') if redata else 'connect_fail'
@@ -249,21 +291,13 @@ class QweatherlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class QweatherOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry):
-        self._config = dict(config_entry.data)
-
     async def async_step_init(self, user_input=None):
         return await self.async_step_user()
 
     async def async_step_user(self, user_input=None):
         if user_input is not None:
-            self._config.update(user_input)
-            self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data=self._config
-            )
-            await self.hass.config_entries.async_reload(self._config_entry_id)
-            return self.async_create_entry(title="", data=self._config)
+            # HA saves these as entry.options and reloads the entry.
+            return self.async_create_entry(title="", data=user_input)
 
         return self.async_show_form(
             step_id="user",
@@ -281,6 +315,12 @@ class QweatherOptionsFlow(config_entries.OptionsFlow):
                         CONF_HOURLYSTEPS,
                         default=self.config_entry.options.get(CONF_HOURLYSTEPS, 24),
                     ): vol.All(vol.Coerce(int), vol.Range(min=24, max=168)),
+                    vol.Optional(
+                        CONF_API_VERSION,
+                        default=self.config_entry.options.get(
+                            CONF_API_VERSION, DEFAULT_API_VERSION
+                        ),
+                    ): vol.In(["v1", "v7"]),
                     vol.Optional(
                         CONF_ALERT,
                         default=self.config_entry.options.get(CONF_ALERT, True),

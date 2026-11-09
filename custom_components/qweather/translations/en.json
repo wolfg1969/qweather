@@ -17,7 +17,8 @@
                 "description": "系统已自动生成 Ed25519 密钥对。\n\n**您的公钥 (Public Key)：**\n{public_key}\n\n**操作步骤：**\n1. 复制上方公钥内容。\n2. 前往 [和风天气控制台](https://console.qweather.com/)，在“项目管理”中创建项目。\n3. 在项目中添加“凭据”，选择 **公钥模式 (Public Key)**。\n4. 将公钥粘贴到控制台并保存。\n5. 将获取到的 **项目ID** 和 **凭据ID** 填入下方。",
                 "data": {
                     "project_id": "项目 ID (Project ID)",
-                    "key_id": "凭据 ID (Key ID)"
+                    "key_id": "凭据 ID (Key ID)",
+                    "dev_id": "Developer ID (optional, JWT iss)"
                 }
             }
         },
@@ -48,6 +49,7 @@
                 "data": {
                     "dailysteps": "天级预报天数 (3-15天)",
                     "hourlysteps": "小时级预报时长 (24-168小时)",
+                    "api_version": "API version (v1 recommended; v7 legacy fallback)",
                     "alert": "启用灾害预警",
                     "life": "启用生活指数",
                     "custom_ui": "启用自定义 UI 属性支持",
