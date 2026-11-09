@@ -1,14 +1,10 @@
 import logging
-import asyncio
-import json
-import re
 import time
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
+from urllib.parse import urlencode
 
 import jwt
-import aiohttp
-from bs4 import BeautifulSoup
 
 from homeassistant.components.weather import (
     Forecast,
@@ -18,10 +14,10 @@ from homeassistant.components.weather import (
 
 from homeassistant.const import (
     CONF_HOST,
-    CONF_API_KEY, 
+    CONF_API_KEY,
     CONF_NAME,
     UnitOfLength,
-    UnitOfPressure,    
+    UnitOfPressure,
     UnitOfSpeed,
     UnitOfTemperature,
 )
@@ -32,8 +28,8 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.components import frontend
 
 from .const import (
-    VERSION, 
-    ROOT_PATH, 
+    VERSION,
+    ROOT_PATH,
     ATTRIBUTION,
     MANUFACTURER,
     DOMAIN,
@@ -52,26 +48,37 @@ from .const import (
     CONF_PROJECT_ID,
     CONF_KEY_ID,
     CONF_PRIVATE_KEY,
+    CONF_API_VERSION,
+    DEFAULT_API_VERSION,
 )
 from .condition import CONDITION_MAP, EXCEPTIONAL
-from .mapping import WarningData
+from .mapping import (
+    WarningData,
+    build_hourly_summary,
+    map_current,
+    map_daily,
+    map_hourly,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-VERSION = "2026.2.5" 
+VERSION = "2026.2.5"
+
+# Falsey sentinel: tells the warning block apart from "request failed".
+_SKIP = False
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     """Set up QWeather entry."""
     await hass.http.async_register_static_paths([
         StaticPathConfig(ROOT_PATH, hass.config.path('custom_components/qweather/local'), False)
     ])
-    
+
     frontend.add_extra_js_url(hass, f"{ROOT_PATH}/qweather-card/qweather-card.js?ver={VERSION}")
     frontend.add_extra_js_url(hass, f"{ROOT_PATH}/qweather-card/qweather-more-info.js?ver={VERSION}")
 
     location = config_entry.data.get(CONF_LOCATION) or \
                f"{round(hass.config.longitude, 2)},{round(hass.config.latitude, 2)}"
-    
+
     name = config_entry.data.get(CONF_NAME, "和风天气")
     host = config_entry.data.get(CONF_HOST, "api.qweather.com")
     usetoken = config_entry.data.get(CONF_USE_TOKEN, False)
@@ -82,7 +89,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     weather_entity = HeFengWeather(data, config_entry.options.get(CONF_CUSTOM_UI, False), unique_id, name)
     async_add_entities([weather_entity], False)
-    
+
     async def _initial_fetch():
         try:
             await data.async_update(dt_util.now())
@@ -94,7 +101,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
     update_interval = config_entry.options.get(CONF_UPDATE_INTERVAL, 10)
     async_track_time_interval(hass, weather_entity.async_update_external, timedelta(minutes=update_interval))
-    
+
     return True
 
 class HeFengWeather(WeatherEntity):
@@ -105,15 +112,15 @@ class HeFengWeather(WeatherEntity):
         self._attr_name = name
         self._attr_unique_id = unique_id
         self._custom_ui = custom_ui
-        
+
         self._attr_native_precipitation_unit = UnitOfLength.MILLIMETERS
         self._attr_native_pressure_unit = UnitOfPressure.HPA
         self._attr_native_temperature_unit = UnitOfTemperature.CELSIUS
         self._attr_native_visibility_unit = UnitOfLength.KILOMETERS
         self._attr_native_wind_speed_unit = UnitOfSpeed.KILOMETERS_PER_HOUR
-        
+
         self._attr_supported_features = (
-            WeatherEntityFeature.FORECAST_DAILY | 
+            WeatherEntityFeature.FORECAST_DAILY |
             WeatherEntityFeature.FORECAST_HOURLY
         )
 
@@ -176,7 +183,7 @@ class HeFengWeather(WeatherEntity):
                 "minutely_summary": data._minutely_summary,
                 "winddir": data._winddir,
                 "windscale": data._windscale,
-                "vis": data._vis, 
+                "vis": data._vis,
                 "precip": data._precip,
                 "dew": data._dew,
                 "obsTime": data._obsTime,
@@ -205,7 +212,8 @@ class WeatherData:
         self._use_token = usetoken
         self._location = location
         self._options = options
-        
+        self._api_version = options.get(CONF_API_VERSION, DEFAULT_API_VERSION)
+
         self._condition = None
         self._condition_cn = None
         self._icon = None
@@ -218,7 +226,7 @@ class WeatherData:
         self._windscale = None
         self._feelslike = None
         self._cloud = None
-        self._vis = None 
+        self._vis = None
         self._precip = None
         self._dew = None
         self._obsTime = None
@@ -232,7 +240,7 @@ class WeatherData:
         self._hourly_summary = ""
         self._minutely_summary = ""
         self._refreshtime = None
-        
+
         self._updates = {k: 0 for k in ['now', 'daily', 'hourly', 'air', 'warning', 'indices', 'geo', 'sun', 'minutely']}
 
     def set_session(self, session):
@@ -248,16 +256,31 @@ class WeatherData:
             _LOGGER.error("JWT Error: %s", e)
             return None
 
-    def _get_forecast_summary_sync(self, url):
+    def _coords(self):
+        """Return (lat, lon) with two decimals for v1 path parameters."""
+        parts = str(self._location or "").replace(" ", "").split(",")
+        if len(parts) != 2:
+            return None
         try:
-            import requests
-            header = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1'}
-            response = requests.get(url, headers=header, timeout=5)
-            response.encoding = 'utf-8'
-            soup = BeautifulSoup(response.text, "html.parser")
-            return soup.select(".current-abstract")[0].contents[0].strip()
-        except:
-            return ""
+            lon = round(float(parts[0]), 2)
+            lat = round(float(parts[1]), 2)
+        except (TypeError, ValueError):
+            return None
+        return f"{lat}", f"{lon}"
+
+    def _update_sun_from_daily(self):
+        if self._daily_forecast:
+            first = self._daily_forecast[0]
+            self._sun_data = {
+                "sunrise": first.get("sunrise"),
+                "sunset": first.get("sunset"),
+            }
+
+    def _refresh_hourly_summary(self):
+        first = self._daily_forecast[0] if self._daily_forecast else None
+        self._hourly_summary = build_hourly_summary(
+            self._native_temperature, first, self._aqi
+        )
 
     async def async_update(self, now):
         """Fetch data from QWeather API."""
@@ -270,142 +293,72 @@ class WeatherData:
             headers["X-QW-Api-Key"] = self._config.get(CONF_API_KEY)
 
         intervals = {
-            'now': 600, 'daily': 3600, 'hourly': 3600, 
-            'air': 3600, 'warning': 300, 'indices': 3600, 
+            'now': 600, 'daily': 3600, 'hourly': 3600,
+            'air': 3600, 'warning': 300, 'indices': 3600,
             'sun': 43200, 'minutely': 600
         }
 
-        async def fetch(url, key):
+        async def fetch(url, key, params=None, validate=None, auth_log=logging.WARNING):
             last_upd = self._updates.get(key, 0)
             if last_upd > 0 and (current_ts - last_upd < intervals.get(key, 600)):
-                return None
-            
-            connector = "&" if "?" in url else "?"
-            final_url = f"{url}{connector}lang=zh"
-            
+                return _SKIP
+
+            if params:
+                connector = "&" if "?" in url else "?"
+                url = f"{url}{connector}{urlencode(params)}"
+
             try:
-                async with self._session.get(final_url, headers=headers, timeout=10) as resp:
-                    data = await resp.json()
-                    if data.get("code") == "200":
-                        self._updates[key] = current_ts
-                        return data
-                    return None
+                async with self._session.get(url, headers=headers, timeout=10) as resp:
+                    if resp.status in (401, 403):
+                        _LOGGER.log(auth_log, "[%s] auth/permission %s: HTTP %s", self._name, key, resp.status)
+                        return None
+                    if resp.status >= 400:
+                        _LOGGER.warning("[%s] HTTP %s fetching %s", self._name, resp.status, key)
+                        return None
+                    data = await resp.json(content_type=None)
             except Exception as e:
                 _LOGGER.error("[%s] Error fetching %s: %s", self._name, key, e)
                 return None
 
-        # 1. Now
-        now_resp = await fetch(f"https://{self._host}/v7/weather/now?location={self._location}", 'now')
-        if now_resp and 'now' in now_resp:
-            c = now_resp['now']
-            self._condition = CONDITION_MAP.get(c.get('icon'), EXCEPTIONAL)
-            self._condition_cn = c.get('text')
-            self._native_temperature = float(c.get('temp', 0))
-            self._humidity = int(c.get('humidity', 0))
-            self._native_pressure = int(c.get('pressure', 0))
-            self._native_wind_speed = float(c.get('windSpeed', 0))
-            self._wind_bearing = float(c.get('wind360', 0))
-            self._winddir = c.get('windDir')
-            self._windscale = c.get('windScale')
-            self._feelslike = float(c.get('feelsLike', 0))
-            self._cloud = c.get('cloud')
-            self._icon = c.get('icon')
-            self._vis = float(c.get('vis', 0))
-            self._precip = float(c.get('precip', 0))
-            self._dew = float(c.get('dew', 0))
-            self._obsTime = c.get('obsTime')
-            if now_resp.get("fxLink"):
-                self._hourly_summary = await self._hass.async_add_executor_job(self._get_forecast_summary_sync, now_resp.get("fxLink"))
+            if not isinstance(data, dict) or "error" in data:
+                return None
+            if data.get("code") == "200" or "metadata" in data:
+                ok = True
+            else:
+                ok = False
+            if not ok or (validate is not None and not validate(data)):
+                return None
 
-        # 2. Daily
-        daily_steps = self._options.get(CONF_DAILYSTEPS, 7)
-        daily_resp = await fetch(f"https://{self._host}/v7/weather/{daily_steps}d?location={self._location}", 'daily')
-        if daily_resp and 'daily' in daily_resp:
-            new_daily = []
-            for d in daily_resp['daily']:
-                raw_date = d.get('fxDate')
-                if raw_date and "T" not in raw_date:
-                    # 将 "2026-02-01" 转换为 "2026-02-01T00:00:00"
-                    fixed_datetime = f"{raw_date}T00:00:00"
-                else:
-                    fixed_datetime = raw_date
-                    
-                new_daily.append({
-                    # 标准 HA 字段
-                    "datetime": fixed_datetime,
-                    "native_temperature": float(d.get('tempMax', 0)),
-                    "native_templow": float(d.get('tempMin', 0)),
-                    "condition": CONDITION_MAP.get(d.get('iconDay'), "exceptional"),
-                    "native_precipitation": float(d.get('precip', 0)),
-                    "native_pressure": float(d.get('pressure', 0)),
-                    "native_wind_speed": float(d.get('windSpeedDay', 0)),
-                    "wind_bearing": float(d.get('wind360Day', 0)),
-                    "humidity": float(d.get("humidity", 0)),
-                    
-                    # 扩展字段 (供自定义卡片使用)
-                    "text": d.get('textDay'),           # 白天天气文字
-                    "icon": d.get('iconDay'),           # 白天图标代码
-                    "textnight": d.get("textNight"),    # 夜间天气文字
-                    "iconnight": d.get("iconNight"),    # 夜间图标代码
-                    "winddirday": d.get("windDirDay"),  # 白天风向
-                    "winddirnight": d.get("windDirNight"), # 夜间风向
-                    "windscaleday": d.get("windScaleDay"), # 白天风力等级
-                    "windscalenight": d.get("windScaleNight"), # 夜间风力等级
-                    "uv_index": d.get("uvIndex"),       # 紫外线
-                    "vis": d.get("vis"),                # 能见度
-                    "cloud": d.get("cloud"),            # 云量
-                    "sunrise": d.get("sunrise"),        # 日出
-                    "sunset": d.get("sunset"),          # 日落
-                    "moonphase": d.get("moonPhase"),    # 月相
-                })
-            self._daily_forecast = new_daily
+            self._updates[key] = current_ts
+            return data
 
-        # 3. Hourly
-        hourly_steps = self._options.get(CONF_HOURLYSTEPS, 24)
-        hourly_resp = await fetch(f"https://{self._host}/v7/weather/{hourly_steps}h?location={self._location}", 'hourly')
-        if hourly_resp and 'hourly' in hourly_resp:
-            new_hourly = []
-            for h_item in hourly_resp['hourly']:
-                try:
-                    dt_obj = datetime.fromisoformat(h_item.get("fxTime").replace('Z', '+00:00'))
-                    time_iso = dt_obj.isoformat()
-                except:
-                    time_iso = h_item.get("fxTime")
-                new_hourly.append({
-                    # 标准 HA 字段
-                    "datetime": time_iso,
-                    "native_temperature": float(h_item.get('temp', 0)),
-                    "condition": CONDITION_MAP.get(h_item.get('icon'), "exceptional"),
-                    "native_precipitation": float(h_item.get('precip', 0)),
-                    "native_pressure": float(h_item.get('pressure', 0)),
-                    "humidity": float(h_item.get('humidity', 0)),
-                    "native_wind_speed": float(h_item.get('windSpeed', 0)),
-                    "wind_bearing": float(h_item.get('wind360', 0)),
-                    
-                    # 扩展字段
-                    "native_precipitation_probability": int(h_item.get('pop', 0)), # 降水概率
-                    "text": h_item.get('text'),   # 天气文字
-                    "icon": h_item.get('icon'),   # 图标代码
-                    "winddir": h_item.get('windDir'), # 风向
-                    "windscale": h_item.get('windScale') # 风力等级
-                })
-            self._hourly_forecast = new_hourly
+        coords = self._coords()
+        use_v1 = self._api_version == "v1" and coords is not None
+        if use_v1:
+            await self._update_v1(fetch, coords)
+        else:
+            if self._api_version == "v1":
+                _LOGGER.warning(
+                    "[%s] api_version=v1 requires 'lon,lat' location, got '%s'; falling back to v7",
+                    self._name, self._location,
+                )
+            await self._update_v7(fetch)
 
         # 4. Air Quality
         try:
-            coords = self._location.split(',')
-            lon, lat = coords[0].strip(), coords[1].strip()
+            location_parts = self._location.split(',')
+            lon, lat = location_parts[0].strip(), location_parts[1].strip()
             # V1 新版接口
             air_v1_url = f"https://api.qweather.com/airquality/v1/current/{lat}/{lon}"
-            air_data = await fetch(air_v1_url, 'air')
-            
+            air_data = await fetch(air_v1_url, 'air', params={'lang': 'zh'})
+
             if air_data:
                 # 兼容 V1 airNow 或 v7 now
                 self._aqi = air_data.get('airNow') or air_data.get('now') or air_data
             else:
                 # 回退到 V7 (适配部分未开通V1权限的KEY)
                 air_v7_url = f"https://{self._host}/v7/air/now?location={self._location}"
-                air_v7_data = await fetch(air_v7_url, 'air')
+                air_v7_data = await fetch(air_v7_url, 'air', params={'lang': 'zh'})
                 if air_v7_data:
                     self._aqi = air_v7_data.get('now', {})
         except Exception as e:
@@ -413,8 +366,8 @@ class WeatherData:
             self._aqi = {}
 
         # 5. Others (Warning & Indices & Astronomy & Minutely)
-        warn_resp = await fetch(f"https://{self._host}/v7/warning/now?location={self._location}", 'warning')
-        
+        warn_resp = await fetch(f"https://{self._host}/v7/warning/now?location={self._location}", 'warning', params={'lang': 'zh'})
+
         if warn_resp and 'warning' in warn_resp:
             self._weather_warning = [
                 WarningData(
@@ -436,11 +389,11 @@ class WeatherData:
                     related=w.get('related', '')
                 ) for w in warn_resp['warning']
             ]
-        else:
-            self._weather_warning = [] # Clear if no warning
-        
+        elif warn_resp is not _SKIP:
+            self._weather_warning = [] # Clear on a real empty response
+
         if self._options.get(CONF_LIFEINDEX, True):
-            idx_resp = await fetch(f"https://{self._host}/v7/indices/1d?type=0&location={self._location}", 'indices')
+            idx_resp = await fetch(f"https://{self._host}/v7/indices/1d?type=0&location={self._location}", 'indices', params={'lang': 'zh'})
             if idx_resp and 'daily' in idx_resp:
                 self._suggestion = [Suggestion(title=SUGGESTIONTPYE2NAME.get(v.get('type'), "未知"), title_cn=v.get('name'), brf=v.get('category'), txt=v.get('text')) for v in idx_resp['daily']]
 
@@ -449,10 +402,10 @@ class WeatherData:
             try:
                 # GeoAPI 使用独立的域名 geoapi.qweather.com
                 geo_url = f"https://geoapi.qweather.com/v2/city/lookup?location={self._location}&lang=zh"
-                
+
                 # 复用上面已经定义好的 headers (包含 token 或 api key)
                 async with self._session.get(geo_url, headers=headers, timeout=10) as resp:
-                    geo_data = await resp.json()
+                    geo_data = await resp.json(content_type=None)
                     if geo_data.get("code") == "200" and geo_data.get("location"):
                         city_name = geo_data["location"][0]["name"]
                         self._city = city_name
@@ -463,14 +416,169 @@ class WeatherData:
             except Exception as e:
                 _LOGGER.error("[%s] GeoAPI Request Error: %s", self._name, e)
                 self._city = "未知" # 出错暂定未知，下次重启再试
-        
-        today_str = datetime.now().strftime("%Y%m%d")
-        sun_resp = await fetch(f"https://{self._host}/v7/astronomy/sun?location={self._location}&date={today_str}", 'sun')
-        if sun_resp:
-            self._sun_data = {"sunrise": sun_resp.get("sunrise"), "sunset": sun_resp.get("sunset")}
 
-        min_resp = await fetch(f"https://{self._host}/v7/minutely/5m?location={self._location}", 'minutely')
-        if min_resp: self._minutely_summary = min_resp.get("summary", "")
+        min_resp = await fetch(f"https://{self._host}/v7/minutely/5m?location={self._location}", 'minutely', params={'lang': 'zh'})
+        if min_resp and min_resp is not _SKIP: self._minutely_summary = min_resp.get("summary", "")
+
+        if use_v1:
+            self._update_sun_from_daily()
+        self._refresh_hourly_summary()
 
         self._available = True
         self._refreshtime = dt_util.as_local(dt_util.now()).strftime('%Y-%m-%d %H:%M')
+
+    async def _update_v1(self, fetch, coords):
+        lat, lon = coords
+
+        # 1. Current
+        now_resp = await fetch(
+            f"https://{self._host}/weather/v1/current/{lat}/{lon}", 'now',
+            params={'localTime': 'true', 'lang': 'zh'},
+            validate=lambda data: "temperature" in data,
+        )
+        if now_resp:
+            mapped = map_current(now_resp)
+            self._condition = mapped["condition"]
+            self._condition_cn = mapped["condition_cn"]
+            self._icon = mapped["icon"]
+            self._native_temperature = mapped["native_temperature"]
+            self._humidity = mapped["humidity"]
+            self._native_pressure = mapped["native_pressure"]
+            self._native_wind_speed = mapped["native_wind_speed"]
+            self._wind_bearing = mapped["wind_bearing"]
+            self._winddir = mapped["winddir"]
+            self._windscale = mapped["windscale"]
+            self._feelslike = mapped["feelslike"]
+            self._cloud = mapped["cloud"]
+            self._vis = mapped["vis"]
+            self._precip = mapped["precip"]
+            self._dew = mapped["dew"]
+            self._obsTime = mapped["obsTime"]
+
+        # 2. Daily
+        daily_steps = self._options.get(CONF_DAILYSTEPS, 7)
+        if daily_steps > 10:
+            _LOGGER.warning(
+                "[%s] API v1 daily supports at most 10 days, clamping %s -> 10",
+                self._name, daily_steps,
+            )
+            daily_steps = 10
+        daily_resp = await fetch(
+            f"https://{self._host}/weather/v1/daily/{lat}/{lon}", 'daily',
+            params={'days': daily_steps, 'localTime': 'true', 'lang': 'zh'},
+            validate=lambda data: "days" in data,
+        )
+        if daily_resp:
+            self._daily_forecast = map_daily(daily_resp, daily_steps)
+
+        # 3. Hourly
+        hourly_steps = self._options.get(CONF_HOURLYSTEPS, 24)
+        hourly_resp = await fetch(
+            f"https://{self._host}/weather/v1/hourly/{lat}/{lon}", 'hourly',
+            params={'hours': hourly_steps, 'localTime': 'true', 'lang': 'zh'},
+            validate=lambda data: "hours" in data,
+        )
+        if hourly_resp:
+            self._hourly_forecast = map_hourly(hourly_resp, hourly_steps)
+
+    async def _update_v7(self, fetch):
+        # 1. Now
+        now_resp = await fetch(f"https://{self._host}/v7/weather/now?location={self._location}", 'now', params={'lang': 'zh'})
+        if now_resp and 'now' in now_resp:
+            c = now_resp['now']
+            self._condition = CONDITION_MAP.get(c.get('icon'), EXCEPTIONAL)
+            self._condition_cn = c.get('text')
+            self._native_temperature = float(c.get('temp', 0))
+            self._humidity = int(c.get('humidity', 0))
+            self._native_pressure = int(c.get('pressure', 0))
+            self._native_wind_speed = float(c.get('windSpeed', 0))
+            self._wind_bearing = float(c.get('wind360', 0))
+            self._winddir = c.get('windDir')
+            self._windscale = c.get('windScale')
+            self._feelslike = float(c.get('feelsLike', 0))
+            self._cloud = c.get('cloud')
+            self._icon = c.get('icon')
+            self._vis = float(c.get('vis', 0))
+            self._precip = float(c.get('precip', 0))
+            self._dew = float(c.get('dew', 0))
+            self._obsTime = c.get('obsTime')
+
+        # 2. Daily
+        daily_steps = self._options.get(CONF_DAILYSTEPS, 7)
+        daily_resp = await fetch(f"https://{self._host}/v7/weather/{daily_steps}d?location={self._location}", 'daily', params={'lang': 'zh'})
+        if daily_resp and 'daily' in daily_resp:
+            new_daily = []
+            for d in daily_resp['daily']:
+                raw_date = d.get('fxDate')
+                if raw_date and "T" not in raw_date:
+                    # 将 "2026-02-01" 转换为 "2026-02-01T00:00:00"
+                    fixed_datetime = f"{raw_date}T00:00:00"
+                else:
+                    fixed_datetime = raw_date
+
+                new_daily.append({
+                    # 标准 HA 字段
+                    "datetime": fixed_datetime,
+                    "native_temperature": float(d.get('tempMax', 0)),
+                    "native_templow": float(d.get('tempMin', 0)),
+                    "condition": CONDITION_MAP.get(d.get('iconDay'), "exceptional"),
+                    "native_precipitation": float(d.get('precip', 0)),
+                    "native_pressure": float(d.get('pressure', 0)),
+                    "native_wind_speed": float(d.get('windSpeedDay', 0)),
+                    "wind_bearing": float(d.get('wind360Day', 0)),
+                    "humidity": float(d.get("humidity", 0)),
+
+                    # 扩展字段 (供自定义卡片使用)
+                    "text": d.get('textDay'),           # 白天天气文字
+                    "icon": d.get('iconDay'),           # 白天图标代码
+                    "textnight": d.get("textNight"),    # 夜间天气文字
+                    "iconnight": d.get("iconNight"),    # 夜间图标代码
+                    "winddirday": d.get("windDirDay"),  # 白天风向
+                    "winddirnight": d.get("windDirNight"), # 夜间风向
+                    "windscaleday": d.get("windScaleDay"), # 白天风力等级
+                    "windscalenight": d.get("windScaleNight"), # 夜间风力等级
+                    "uv_index": d.get("uvIndex"),       # 紫外线
+                    "vis": d.get("vis"),                # 能见度
+                    "cloud": d.get("cloud"),            # 云量
+                    "sunrise": d.get("sunrise"),        # 日出
+                    "sunset": d.get("sunset"),          # 日落
+                    "moonphase": d.get("moonPhase"),    # 月相
+                })
+            self._daily_forecast = new_daily
+
+        # 3. Hourly
+        hourly_steps = self._options.get(CONF_HOURLYSTEPS, 24)
+        hourly_resp = await fetch(f"https://{self._host}/v7/weather/{hourly_steps}h?location={self._location}", 'hourly', params={'lang': 'zh'})
+        if hourly_resp and 'hourly' in hourly_resp:
+            new_hourly = []
+            for h_item in hourly_resp['hourly']:
+                try:
+                    dt_obj = datetime.fromisoformat(h_item.get("fxTime").replace('Z', '+00:00'))
+                    time_iso = dt_obj.isoformat()
+                except:
+                    time_iso = h_item.get("fxTime")
+                new_hourly.append({
+                    # 标准 HA 字段
+                    "datetime": time_iso,
+                    "native_temperature": float(h_item.get('temp', 0)),
+                    "condition": CONDITION_MAP.get(h_item.get('icon'), "exceptional"),
+                    "native_precipitation": float(h_item.get('precip', 0)),
+                    "native_pressure": float(h_item.get('pressure', 0)),
+                    "humidity": float(h_item.get('humidity', 0)),
+                    "native_wind_speed": float(h_item.get('windSpeed', 0)),
+                    "wind_bearing": float(h_item.get('wind360', 0)),
+
+                    # 扩展字段
+                    "native_precipitation_probability": int(h_item.get('pop', 0)), # 降水概率
+                    "text": h_item.get('text'),   # 天气文字
+                    "icon": h_item.get('icon'),   # 图标代码
+                    "winddir": h_item.get('windDir'), # 风向
+                    "windscale": h_item.get('windScale') # 风力等级
+                })
+            self._hourly_forecast = new_hourly
+
+        # 4. Astronomy (kept for the v7 rollback path; v1 uses daily.astro)
+        today_str = datetime.now().strftime("%Y%m%d")
+        sun_resp = await fetch(f"https://{self._host}/v7/astronomy/sun?location={self._location}&date={today_str}", 'sun', params={'lang': 'zh'})
+        if sun_resp:
+            self._sun_data = {"sunrise": sun_resp.get("sunrise"), "sunset": sun_resp.get("sunset")}

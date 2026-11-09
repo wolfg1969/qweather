@@ -2,12 +2,10 @@
   "domain": "qweather",
   "name": "和风天气－官方API版",
   "codeowners": ["dscao"],
-  "config_flow": true,		
-  "documentation": "https://github.com/dscao/qweather",	
-  "dependencies": [],	
+  "config_flow": true,
+  "documentation": "https://github.com/dscao/qweather",
+  "dependencies": [],
   "iot_class": "cloud_polling",
-  "requirements": ["requests", "beautifulsoup4"],
+  "requirements": ["requests"],
   "version": "2026.2.5"
 }
-
-
